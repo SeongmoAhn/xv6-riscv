@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"
+#include "procinfo.h"
 
 uint64
 sys_exit(void)
@@ -109,4 +110,22 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_procinfo(void)
+{
+  int pid;
+  uint64 uaddr;
+  struct procinfo ki;
+  struct proc *p = myproc();
+
+  argint(0, &pid);
+  argaddr(1, &uaddr);
+  if (procinfo(pid, &ki) < 0)
+    return -1;
+  // locks are released: copyout may fault, so never call it under a spinlock
+  if (copyout(p->pagetable, p->sz, uaddr, (char *)&ki, sizeof(ki)) < 0)
+    return -1;
+  return 0;
 }

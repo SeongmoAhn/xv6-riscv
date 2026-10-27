@@ -13,7 +13,7 @@ The original xv6 notice is kept in [`README`](README).
 | # | Topic | Branch | Tag | Status |
 |---|---|---|---|---|
 | 0 | Environment (Docker, QEMU, gdb) | `chore/docker-env`, `chore/gdb-setup` | `lab0-env` | Done |
-| 1 | System call | `feat/sys-procinfo` | - | Planned |
+| 1 | System call (`procinfo`) | `feat/sys-procinfo` | `lab1-syscall` | Done |
 | 2 | Priority scheduler | `feat/priority-scheduler` | - | Planned |
 | 3 | Memory (lazy alloc / COW fork) | `feat/cow-fork` | - | Planned |
 | 4 | File system (double indirect blocks / symlinks) | `feat/fs-double-indirect` | - | Planned |
@@ -77,3 +77,41 @@ make gdb           # terminal B
   `gcc-riscv64-linux-gnu`.
 - gdb must run in the same container as QEMU because `.gdbinit` connects
   to `127.0.0.1:25000` (port derived from uid 0 inside the container).
+
+## Lab 1: `procinfo` System Call
+
+### What I changed
+- Added `procinfo(int pid, struct procinfo *info)`, which returns a process's
+  pid, parent pid, state, memory size, and name. Returns 0 on success, -1 if
+  the pid does not exist or the user pointer is invalid.
+- `kernel/procinfo.h`: struct shared by kernel and user code.
+- `kernel/proc.c`: `procinfo()` scans `proc[]`, holding `wait_lock` and then
+  `p->lock` (same order as `wait()`), and copies fields into a kernel-stack
+  buffer.
+- `kernel/sysproc.c`: `sys_procinfo()` reads arguments with `argint`/`argaddr`
+  and calls `copyout` only after all locks are released.
+- Wired up `kernel/syscall.h`, the table in `kernel/syscall.c`,
+  `user/usys.pl`, and `user/user.h`.
+- Added the test program `user/procinfotest.c`.
+
+### How to test
+```
+make qemu
+$ procinfotest
+pid=4 ppid=2 state=run sz=16384 name=procinfotest
+procinfotest: OK
+```
+The test also checks that a nonexistent pid and an unmapped user pointer
+both return -1.
+
+### What I learned
+- The user-to-kernel path: `ecall` -> `uservec` (trampoline, mapped at the
+  same VA in both page tables) -> `usertrap()` -> `syscall()` -> `sret`.
+- The syscall table uses designated initializers. A missing entry shows up
+  as `unknown sys call N` because the unset slot is NULL.
+- Kernel code must never dereference user pointers directly; `copyout`
+  walks the user page table and fails safely.
+- `parent` is protected by `wait_lock`, not `p->lock`, and locks must be
+  taken in a fixed order to avoid deadlock.
+- Holding a spinlock across `copyout` is unsafe because it can fault and
+  sleep, so the data is copied to a local buffer first.
