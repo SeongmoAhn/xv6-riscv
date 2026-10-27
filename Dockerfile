@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    bc \
     gcc-riscv64-linux-gnu \
     qemu-system-misc \
     gdb-multiarch \
