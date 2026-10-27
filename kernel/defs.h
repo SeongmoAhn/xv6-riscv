@@ -61,6 +61,8 @@ void            ireclaim(int);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+void            kref(void *);
+int             krefcount(void *);
 
 // log.c
 void            initlog(int, struct superblock*);
