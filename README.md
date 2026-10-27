@@ -14,7 +14,7 @@ The original xv6 notice is kept in [`README`](README).
 |---|---|---|---|---|
 | 0 | Environment (Docker, QEMU, gdb) | `chore/docker-env`, `chore/gdb-setup` | `lab0-env` | Done |
 | 1 | System call (`procinfo`) | `feat/sys-procinfo` | `lab1-syscall` | Done |
-| 2 | Priority scheduler | `feat/priority-scheduler` | - | Planned |
+| 2 | Priority scheduler (`setpriority`) | `feat/priority-scheduler` | `lab2-scheduler` | Done |
 | 3 | Memory (lazy alloc / COW fork) | `feat/cow-fork` | - | Planned |
 | 4 | File system (double indirect blocks / symlinks) | `feat/fs-double-indirect` | - | Planned |
 | 5 | Synchronization / lock contention | `feat/lock-contention-stats` | - | Planned |
@@ -115,3 +115,45 @@ both return -1.
   taken in a fixed order to avoid deadlock.
 - Holding a spinlock across `copyout` is unsafe because it can fault and
   sleep, so the data is copied to a local buffer first.
+
+## Lab 2: Priority Scheduler
+
+### What I changed
+- Added `priority` (0 = highest, 9 = lowest, default 5) to `struct proc`,
+  protected by `p->lock`; children inherit the parent's priority in `kfork()`.
+- Replaced the round-robin loop in `scheduler()` with a two-pass selection:
+  pass 1 scans `proc[]` (each slot under its own lock) for the RUNNABLE
+  process with the smallest priority number; pass 2 locks the winner and
+  re-checks `state == RUNNABLE` before `swtch()`.
+- Equal priorities still take turns: each scan starts after the slot that
+  ran last on this CPU (`last`, a local variable in `scheduler()`).
+- Added `setpriority(pid, prio)` (returns 0, or -1 for a bad pid or an
+  out-of-range priority).
+- Added `user/schedtest.c`: three CPU-bound children with priorities 1, 5, 9.
+- `GNUmakefile` now forwards `CPUS` to the container, and the Docker image
+  installs `bc` (needed by the Makefile's QEMU version check).
+
+### How to test
+```
+make qemu CPUS=1
+$ schedtest
+```
+
+| Scheduler | child 0 (prio 1) | child 1 (prio 5) | child 2 (prio 9) |
+|---|---|---|---|
+| Round robin, equal priority | 36 ticks | 36 ticks | 36 ticks |
+| Priority scheduler | 12 ticks | 26 ticks | 38 ticks |
+
+Run on a single CPU so the children compete for it. To check for races, boot
+with the default 3 CPUs and run `usertests -q`; all tests pass. The
+`usertrap(): unexpected scause` lines in its output are expected, because
+some tests deliberately touch invalid addresses.
+
+### What I learned
+- Candidates are chosen without holding a lock across the whole scan, so the
+  choice can be stale; the re-check under the lock in pass 2 is what prevents
+  two cores from running the same process.
+- `p->lock` is held across `swtch()` and released by the other side (lock
+  handoff), which makes the state change and the context switch atomic.
+- Strict priority scheduling can starve low-priority processes, and each
+  pick costs O(NPROC). Aging or per-priority run queues would address this.

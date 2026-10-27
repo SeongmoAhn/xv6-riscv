@@ -129,3 +129,15 @@ sys_procinfo(void)
     return -1;
   return 0;
 }
+
+uint64
+sys_setpriority(void)
+{
+  int pid, prio;
+
+  argint(0, &pid);
+  argint(1, &prio);
+  if (prio < 0 || prio > MAXPRIO)
+    return -1;
+  return setpriority(pid, prio);
+}

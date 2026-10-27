@@ -124,6 +124,7 @@ allocproc(void)
 
 found:
   p->pid = allocpid();
+  p->priority = DEFPRIO;
   p->state = USED;
 
   // Allocate a trapframe page.
@@ -259,9 +260,14 @@ growproc(int n)
 int
 kfork(void)
 {
-  int i, pid;
+  int i, pid, prio;
   struct proc *np;
   struct proc *p = myproc();
+
+  // read parent's priority first; another process may call setpriority
+  acquire(&p->lock);
+  prio = p->priority;
+  release(&p->lock);
 
   // Allocate process.
   if ((np = allocproc()) == 0) {
@@ -275,6 +281,7 @@ kfork(void)
     return -1;
   }
   np->sz = p->sz;
+  np->priority = prio; // np->lock is still held here
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -426,11 +433,56 @@ kwait(uint64 addr)
 //  - swtch to start running that process.
 //  - eventually that process transfers control
 //    via swtch back to the scheduler.
+// void
+// scheduler(void)
+// {
+//   struct proc *p;
+//   struct cpu *c = mycpu();
+
+//   c->proc = 0;
+//   for (;;) {
+//     // The most recent process to run may have had interrupts
+//     // turned off; enable them to avoid a deadlock if all
+//     // processes are waiting. Then turn them back off
+//     // to avoid a possible race between an interrupt
+//     // and wfi.
+//     intr_on();
+//     intr_off();
+
+//     int found = 0;
+//     for (p = proc; p < &proc[NPROC]; p++) {
+//       acquire(&p->lock);
+//       if (p->state == RUNNABLE) {
+//         // Switch to chosen process.  It is the process's job
+//         // to release its lock and then reacquire it
+//         // before jumping back to us.
+//         p->state = RUNNING;
+//         c->proc = p;
+//         swtch(&c->context, &p->context);
+
+//         // Don't re-enable interrupts on release.
+//         mycpu()->intena = 0;
+
+//         // Process is done running for now.
+//         // It should have changed its p->state before coming back.
+//         c->proc = 0;
+//         found = 1;
+//       }
+//       release(&p->lock);
+//     }
+//     if (found == 0) {
+//       // nothing to run; stop running on this core until an interrupt.
+//       asm volatile("wfi");
+//     }
+//   }
+// }
 void
 scheduler(void)
 {
-  struct proc *p;
+  struct proc *p, *best;
   struct cpu *c = mycpu();
+  int i, bestprio;
+  int last = 0; // slot run last on this CPU; scan resumes after it, so equal priorities take turns
 
   c->proc = 0;
   for (;;) {
@@ -442,31 +494,47 @@ scheduler(void)
     intr_on();
     intr_off();
 
-    int found = 0;
-    for (p = proc; p < &proc[NPROC]; p++) {
+    // Pass 1: find the RUNNABLE process with thw smallest priority number.
+    // Each slot is inspected under its own lock; the lock is dropped before
+    // moving on, so the choice may be stale by the time we use it.
+    best = 0;
+    bestprio = MAXPRIO + 1;
+    for (i = 1; i <= NPROC; i++) {
+      p = &proc[(last + i) % NPROC];
       acquire(&p->lock);
-      if (p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Don't re-enable interrupts on release.
-        mycpu()->intena = 0;
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-        found = 1;
+      if (p->state == RUNNABLE && p->priority < bestprio) {
+        best = p;
+        bestprio = p->priority;
       }
       release(&p->lock);
     }
-    if (found == 0) {
+
+    if (best == 0) {
       // nothing to run; stop running on this core until an interrupt.
       asm volatile("wfi");
+      continue;
     }
+
+    // Pass 2: lock the chosen process and re-check it. Another core may
+    // have taken it, or it may have slept or exited since pass 1.
+    acquire(&best->lock);
+    if (best->state == RUNNABLE) {
+      // Switch to chosen process. It is the process's job
+      // to release its lock and then reacquire it
+      // before jumping back to us.
+      best->state = RUNNING;
+      c->proc = best;
+      swtch(&c->context, &best->context);
+
+      // Don't re-enable interrupts on release.
+      mycpu()->intena = 0;
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      c->proc = 0;
+    }
+    release(&best->lock);
+    last = best - proc;
   }
 }
 
@@ -726,5 +794,23 @@ procinfo(int pid, struct procinfo *out)
     release(&p->lock);
   }
   release(&wait_lock);
+  return -1;
+}
+
+// Set the priority of process pid. Returns 0, or -1 if no such process.
+int
+setpriority(int pid, int prio)
+{
+  struct proc *p;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state != UNUSED && p->pid == pid) {
+      p->priority = prio;
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
   return -1;
 }
