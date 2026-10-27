@@ -796,3 +796,21 @@ procinfo(int pid, struct procinfo *out)
   release(&wait_lock);
   return -1;
 }
+
+// Set the priority of process pid. Returns 0, or -1 if no such process.
+int
+setpriority(int pid, int prio)
+{
+  struct proc *p;
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state != UNUSED && p->pid == pid) {
+      p->priority = prio;
+      release(&p->lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+  return -1;
+}
