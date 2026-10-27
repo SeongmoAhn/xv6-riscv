@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "procinfo.h"
 
 struct cpu cpus[NCPU];
 
@@ -700,4 +701,30 @@ procdump(void)
     printk("%d %s %s", p->pid, state, p->name);
     printk("\n");
   }
+}
+
+// Fill *out with info about process pid.
+// Returns 0, or -1 if there is no such process.
+int
+procinfo(int pid, struct procinfo *out)
+{
+  struct proc *p;
+
+  acquire(&wait_lock); // same order as wait(): wait_lock, then p->lock
+  for (p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if (p->state != UNUSED && p->pid == pid) {
+      out->pid = p->pid;
+      out->ppid = p->parent ? p->parent->pid : 0;
+      out->state = p->state;
+      out->sz = p->sz;
+      safestrcpy(out->name, p->name, sizeof(out->name));
+      release(&p->lock);
+      release(&wait_lock);
+      return 0;
+    }
+    release(&p->lock);
+  }
+  release(&wait_lock);
+  return -1;
 }
