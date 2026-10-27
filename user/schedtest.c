@@ -4,6 +4,8 @@
 #define NCHILD 3
 #define WORK 400000000
 
+static const int prio[NCHILD] = { 1, 5, 9 }; // lower number = higher priority
+
 static void
 spin(void)
 {
@@ -20,6 +22,7 @@ main(void)
 
     for (int n = 0; n < NCHILD; n++) {
         if (fork() == 0) {
+            setpriority(getpid(), prio[n]);
             spin();
             printf("child %d done: %d ticks\n", n, uptime() - start);
             exit(0);
