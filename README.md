@@ -15,7 +15,7 @@ The original xv6 notice is kept in [`README`](README).
 | 0 | Environment (Docker, QEMU, gdb) | `chore/docker-env`, `chore/gdb-setup` | `lab0-env` | Done |
 | 1 | System call (`procinfo`) | `feat/sys-procinfo` | `lab1-syscall` | Done |
 | 2 | Priority scheduler (`setpriority`) | `feat/priority-scheduler` | `lab2-scheduler` | Done |
-| 3 | Memory (lazy alloc / COW fork) | `feat/cow-fork` | - | Planned |
+| 3 | Memory (copy-on-write fork) | `feat/cow-fork` | `lab3-cow` | Done |
 | 4 | File system (double indirect blocks / symlinks) | `feat/fs-double-indirect` | - | Planned |
 | 5 | Synchronization / lock contention | `feat/lock-contention-stats` | - | Planned |
 
@@ -157,3 +157,58 @@ some tests deliberately touch invalid addresses.
   handoff), which makes the state change and the context switch atomic.
 - Strict priority scheduling can starve low-priority processes, and each
   pick costs O(NPROC). Aging or per-priority run queues would address this.
+
+## Lab 3: Copy-on-Write fork
+
+This xv6 version already has lazy allocation (`sbrk` with the lazy flag and
+`vmfault()`), so this lab implements copy-on-write `fork` on top of it.
+
+### What I changed
+- `kernel/kalloc.c`: added a per-page reference count (indexed by
+  `(pa - KERNBASE) / PGSIZE`, protected by `kmem.lock`). `kalloc` sets it to 1,
+  `kref` increments it, and `kfree` only returns a page to the free list when
+  the count drops to 0. `freerange` seeds the counts with 1 at boot so the
+  initial `kfree` calls do not underflow.
+- `kernel/riscv.h`: `PTE_COW`, a software bit (RSW, bit 8) marking shared pages.
+- `kernel/vm.c`:
+  - `uvmcopy()` no longer copies memory. It maps the parent's physical page
+    into the child, clears `PTE_W` and sets `PTE_COW` on both sides for
+    writable pages, and bumps the reference count. Read-only pages (text) are
+    shared as is.
+  - `cowfault()` handles a write to a COW page: if the page still has another
+    owner it allocates and copies a private page; if the caller is the last
+    owner it just restores `PTE_W`.
+  - `vmfault()` calls `cowfault()` for store faults on mapped pages, and
+    `copyout()` calls it too, because the kernel writes through physical
+    addresses and never takes a page fault itself.
+- `user/cowtest.c`: forks a ~78MB process (impossible without COW on 128MB of
+  RAM), checks isolation in both directions (child writes, parent writes), and
+  checks that `read()` into a COW buffer works.
+
+### How to test
+```
+make qemu
+$ cowtest
+largefork: ok
+childwrites: ok
+parentwrites: ok
+copyouttest: ok
+cowtest: all ok
+$ usertests -q
+ALL TESTS PASSED
+```
+Run it on the default 3 CPUs. The `usertrap(): unexpected scause` lines in the
+`usertests` output are expected, because some tests touch invalid addresses on
+purpose.
+
+### What I learned
+- A store to a read-only PTE raises scause 15. The kernel's own `copyout`
+  never faults, so it has to break COW sharing by hand.
+- Reference counts make `kfree` safe with shared pages, and the boot-time
+  `freerange` path is a classic underflow trap.
+- `userret` executes `sfence.vma` after switching `satp`, so the parent's stale
+  writable TLB entries are gone by the time it returns to user mode.
+- My first `cowtest` passed while `wait()` was silently failing, because the
+  status variable was uninitialized and the return value was not checked.
+  Output with interleaved characters was the hint that processes were running
+  out of order.
