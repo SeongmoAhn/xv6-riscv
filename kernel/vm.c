@@ -295,13 +295,41 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
+// int
+// uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+// {
+//   pte_t *pte;
+//   uint64 pa, i;
+//   uint flags;
+//   char *mem;
+
+//   for (i = 0; i < sz; i += PGSIZE) {
+//     if ((pte = walk(old, i, 0)) == 0)
+//       continue; // page table entry hasn't been allocated
+//     if ((*pte & PTE_V) == 0)
+//       continue; // physical page hasn't been allocated
+//     pa = PTE2PA(*pte);
+//     flags = PTE_FLAGS(*pte);
+//     if ((mem = kalloc()) == 0)
+//       goto err;
+//     memmove(mem, (char *)pa, PGSIZE);
+//     if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
+//       kfree(mem);
+//       goto err;
+//     }
+//   }
+//   return 0;
+
+// err:
+//   uvmunmap(new, 0, i / PGSIZE, 1);
+//   return -1;
+// }
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for (i = 0; i < sz; i += PGSIZE) {
     if ((pte = walk(old, i, 0)) == 0)
@@ -309,15 +337,17 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if ((*pte & PTE_V) == 0)
       continue; // physical page hasn't been allocated
     pa = PTE2PA(*pte);
+    // Writable pages become copy-on-write in parent and child alike.
+    // Read-only pages (text) are simply shared.
+    if (*pte & PTE_W)
+      *pte = (*pte & ~PTE_W) | PTE_COW;
     flags = PTE_FLAGS(*pte);
-    if ((mem = kalloc()) == 0)
+    if (mappages(new, i, PGSIZE, pa, flags) != 0)
       goto err;
-    memmove(mem, (char *)pa, PGSIZE);
-    if (mappages(new, i, PGSIZE, (uint64)mem, flags) != 0) {
-      kfree(mem);
-      goto err;
-    }
+    kref((void *)pa);
   }
+  // The parent's stale writable TLB entries are flushed by the
+  // sfence.vma in userret when it returns to user space.
   return 0;
 
 err:
@@ -360,6 +390,12 @@ copyout(pagetable_t pagetable, uint64 psz, uint64 dstva, char *src, uint64 len)
     }
 
     pte = walk(pagetable, va0, 0);
+    // The kernel writes through physical addresses, so no page fault
+    // happens: break the copy-on-write sharing by hand.
+    if ((*pte & PTE_W) == 0 && (*pte & PTE_COW)) {
+      if ((pa0 = cowfault(pagetable, va0)) == 0)
+        return -1;
+    }
     // forbid copyout over read-only user text pages.
     if ((*pte & PTE_W) == 0)
       return -1;
@@ -451,9 +487,44 @@ copyinstr(pagetable_t pagetable, uint64 psz, char *dst, uint64 srcva,
   }
 }
 
+// Handle a write to a copy-on-write page at va.
+// Returns the physical address of the (now writable) page, or 0 if
+// va is not a COW page or memory ran out.
+uint64
+cowfault(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *mem;
+
+  if (va >= MAXVA)
+    return 0;
+  va = PGROUNDDOWN(va);
+  if ((pte = walk(pagetable, va, 0)) == 0)
+    return 0;
+  if ((*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_COW) == 0) 
+    return 0;
+
+  pa = PTE2PA(*pte);
+  if (krefcount((void *)pa) == 1) {
+    // Last owner: nobody else can see the page, so just make it writable.
+    *pte = (*pte | PTE_W) & ~PTE_COW;
+    return pa;
+  }
+
+  if ((mem = kalloc()) == 0)
+    return 0;
+  memmove(mem, (char *)pa, PGSIZE);
+  flags = (PTE_FLAGS(*pte) | PTE_W) & ~PTE_COW;
+  *pte = PA2PTE(mem) | flags;
+  kfree((void *)pa); // drop this process's reference to the shared page
+  return (uint64)mem;
+}
+
 // allocate and map user memory if process is referencing a page
 // that was lazily allocated in sys_sbrk().
-// returns 0 if va is invalid or already mapped, or if
+// returns 0 if va is invalid or not a COW page, or if
 // out of physical memory, and physical address if successful.
 uint64
 vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
@@ -464,6 +535,9 @@ vmfault(pagetable_t pagetable, uint64 psz, uint64 va, int read)
     return 0;
   va = PGROUNDDOWN(va);
   if (ismapped(pagetable, va)) {
+    // A store to a mapped page may be a write to a copy-on-write page.
+    if (!read)
+      return cowfault(pagetable, va);
     return 0;
   }
   mem = (uint64)kalloc();
