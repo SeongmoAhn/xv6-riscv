@@ -11,4 +11,4 @@ gdb:
 	docker exec -it xv6 gdb-multiarch -x .gdbinit
 
 .DEFAULT:
-	$(DOCKER_RUN) make -f Makefile $@
+	$(DOCKER_RUN) make -f Makefile $(if $(CPUS),CPUS=$(CPUS)) $@
