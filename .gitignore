@@ -1,0 +1,13 @@
+*.o
+*.d
+*.asm
+*.sym
+*.img
+kernel/kernel
+user/_*
+user/initcode
+user/usys.S
+mkfs/mkfs
+.gdbinit
+
+CLAUDE.md
